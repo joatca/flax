@@ -1,0 +1,262 @@
+#!/usr/bin/env ruby
+# coding: utf-8
+
+# flax - allow queries and updates to FLAC file tags via SQL (sqlite)
+# Copyright (C) 2021 Fraser McCrossan
+#
+# flax is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+require "find"
+require "set"
+require 'fileutils'
+require "optparse"
+require "taglib"
+require "file-find"
+require 'sqlite3'
+
+class Config
+
+  attr_reader :run, :tmpdb, :multivalue_separator
+  
+  def initialize
+    command = "sqlite3"
+    @tmpdb = "./.flax.db"
+    @multivalue_separator = ";"
+    OptionParser.new do |opts|
+      opts.banner = "Usage: #{$0} [options] [directory/FLACfile ...]"
+
+      opts.on("-cCOMMAND", "--command=COMMAND", "command to run on database (default #{command})") do |c|
+        command = c
+      end
+
+      opts.on("-dPATH", "--database=PATH", "use PATH as the temporary database (default #{@tmpdb})") do |d|
+        @tmpdb = d
+      end
+
+      opts.on("-sCHARACTER", "--separator=CHARACTER", "use CHARACTER as the separator for multivalue fields (default #{@multivalue_separator})") do |s|
+        @multivalue_separator = s
+      end
+
+      opts.on("-h", "--help", "Prints this help") do
+        puts opts
+        exit
+      end
+    end.parse!
+
+    # if the command doesn't contain slashes, find it in the path
+    @run = (command =~ /\//) ? command : ENV["PATH"].split(':').map { |p|"#{p}/#{command}" }.find { |exe| FileTest.executable?(exe) }
+    raise "#{command} not found" if run.nil?
+    raise "cannot execute #{@run}" unless FileTest.executable?(@run)
+  end
+
+end
+
+def secs_to_ms(playtime)
+  secs = playtime % 60
+  sprintf("%02d:%02d", playtime.to_i / 60, secs)
+end
+
+class Track
+
+  # e.g. :artist_t ⇒ "ARTIST"
+  def self.col_to_name(col_name)
+    col_name.split('_')[0].upcase
+  end
+  
+  # e.g. :artist_t ⇒ "ARTIST TEXT"
+  def self.col_to_sqlite(col_name)
+    col, type = col_name.split('_')
+    sql_type = case type
+               when "t"
+                 "TEXT"
+               when "i"
+                 "INTEGER"
+               when "n"
+                 "NUMERIC"
+               end
+    "#{col.upcase} #{sql_type}"
+  end
+
+  # FLAC supports arbitrary columns but to load into an SQL table we need to choose a bunch of them; here we
+  # choose the recommended field names from https://xiph.org/vorbis/doc/v-comment.html plus a few others; format
+  # is name_type where types are:
+  #
+  # t: text
+  # i: integer
+  # n: number
+  META_COLUMNS = [
+    # these fields are recommended by https://open.spotify.com/artist/6AVCyrpR4Xa1KGogDooLrU/discography
+    "title_t",
+    "version_t",
+    "album_t",
+    "tracknumber_i",
+    "artist_t",
+    "performer_t",
+    "copyright_t",
+    "license_t",
+    "organization_t",
+    "description_t",
+    "genre_t",
+    "date_t",
+    "location_t",
+    "contact_t",
+    "isrc_t",
+    # these are extra additions that are in common use
+    "composer_t",
+    "tracktotal_i",
+    "discnumber_i",
+    "albumartist_t",
+  ]
+  OTHER_COLUMNS = [ "filename_t" ]
+  META_COLUMN_NAMES = META_COLUMNS.map { |c| col_to_name(c) }
+  OTHER_COLUMN_NAMES = OTHER_COLUMNS.map { |c| col_to_name(c) }
+  COLUMN_NAMES = META_COLUMN_NAMES + OTHER_COLUMN_NAMES
+  META_SQLITE_COLUMNS = META_COLUMNS.map { |c| col_to_sqlite(c) }
+  OTHER_SQLITE_COLUMNS = OTHER_COLUMNS.map { |c| col_to_sqlite(c) }
+  SQLITE_COLUMNS = META_SQLITE_COLUMNS + OTHER_SQLITE_COLUMNS
+  QUERY_PLACEHOLDERS = [ "?" ] * COLUMN_NAMES.length
+  TABLE_NAME = "music"
+  LOAD_QUERY = "INSERT INTO #{TABLE_NAME} (#{COLUMN_NAMES.join(", ")}) VALUES (#{QUERY_PLACEHOLDERS.join(", ")});"
+  attr_reader :filename, :vals
+
+  def self.load(config, db, filename)
+    ref = open_flac(filename)
+    file_fields = ref.xiph_comment.field_list_map
+    # we need to extract the vlaues in the same order as they are listed in LOAD_QUERY above, so that means
+    # doing the META columns first then appending the filename column
+    vals = META_COLUMN_NAMES.map { |colname|
+      file_fields[colname].is_a?(Array) ? file_fields[colname].join(config.multivalue_separator) : file_fields[colname]
+    }
+    vals << filename
+    db.execute(Track::LOAD_QUERY, vals) # this loads the data into the table so we can then throw it away
+    ref.close # we must close the TagLib object otherwise we'll run out of file descriptors
+  end
+
+  def self.open_flac(filename)
+    TagLib::FLAC::File.new(filename)
+  end
+
+  # result is one row from a select
+  def self.update(filename, row, separator, ignore = [])
+    ref = self.open_flac(filename)
+    row.keys.reject { |field| ignore.include?(field) }.each_with_index do |field|
+      if row[field].is_a?(String)
+        row[field].split(separator).each_with_index do |value, i|
+          # we set replace=true for the first item and false for subsequent items so we can completely replace
+          # multivalue contents
+          ref.xiph_comment.add_field(field, value, replace = (i == 0))
+        end
+      else
+        ref.xiph_comment.add_field(field, row[field].to_s, replace = true)
+      end
+    end
+    ref.save
+    ref.close
+  end
+  
+end
+
+config = Config.new
+
+files = []
+found = loaded = 0
+
+def loading_status(msg, loaded, found)
+  STDERR.printf("%s: %d/%d %s%s", msg, loaded, found, loaded == 0 ? "" : sprintf("(%d%%)", 100 * loaded / found),
+                loaded == found ? "\n" : "\r")
+  STDERR.flush
+end
+
+ARGV.each do |path|
+  case
+  when FileTest.directory?(path)
+  # recurse and add all FLAC files we find
+    rule = File::Find.new(:pattern => "*.[fF][lL][aA][cC]",
+                          :follow => true,
+                          :path => path)
+    rule.find do |path|
+      files << path
+      found += 1
+      loading_status("Finding files", loaded, found)
+    end
+  when FileTest.file?(path) && File.extname(path).downcase == '.flac'
+    files << path
+    found += 1
+    loading_status("Finding files", loaded, found)
+  else
+    STDERR.puts "#{$0}: skipping #{path}"
+  end
+end
+
+# create the temporary SQLite database
+SQLite3::Database.new(config.tmpdb) do |db|
+  # create the base table
+  create = <<-SQL
+  create table music (#{Track::SQLITE_COLUMNS.join(',')});
+  SQL
+  begin
+    db.execute(create)
+  rescue SQLite3::SQLException => e
+    STDERR.puts "unable to create database table (does the database file #{config.tmpdb} already exist?"
+    exit 1
+  end
+
+  db.execute("BEGIN;")
+  files.each do |path|
+    Track.load(config, db, path)
+    loaded += 1
+    loading_status("Loading files", loaded, found)
+  end
+  db.execute("COMMIT;")
+
+  # now create all the secondary tables and triggers
+  [
+    # notes which rows have been changed so we know which to save
+    "CREATE TABLE _change_log (rowid_changed INTEGER UNIQUE);",
+    # notes which rows have been deleted so we know which files to delete
+    "CREATE TABLE _delete_log (deleted_filename TEXT UNIQUE);",
+    # notes which rows have been renamed and their original filenames
+    "CREATE TABLE _rename_log (rowid_renamed INTEGER UNIQUE, original_filename TEXT);",
+    "CREATE TRIGGER _do_not_delete_modified_rows BEFORE DELETE ON #{Track::TABLE_NAME} FOR EACH ROW WHEN old.rowid in (SELECT rowid_changed FROM _change_log) BEGIN SELECT raise(ROLLBACK, 'You may not delete a modified record'); END;",
+    "CREATE TRIGGER _record_delete AFTER DELETE ON #{Track::TABLE_NAME} FOR EACH ROW BEGIN INSERT INTO _delete_log (deleted_filename) VALUES (old.filename); END;",
+    "CREATE TRIGGER _record_rename AFTER UPDATE OF filename ON #{Track::TABLE_NAME} BEGIN INSERT OR IGNORE INTO _rename_log (rowid_renamed, original_filename) VALUES (old.rowid, old.filename); END;",
+    "CREATE TRIGGER _record_changes AFTER UPDATE ON #{Track::TABLE_NAME} BEGIN INSERT OR IGNORE INTO _change_log (rowid_changed) VALUES (old.rowid); END;",
+  ].each do |stmt|
+    db.execute(stmt)
+  end
+  db.close
+
+  # run the sqlite command on the resulting database
+  system(config.run, config.tmpdb)
+
+  # open the database again to check the changes
+  SQLite3::Database.new(config.tmpdb) do |db|
+    db.results_as_hash = true
+    # find all changed records (and original filenames if they were renamed)
+    db.execute("SELECT music.*, _rename_log.original_filename AS ORIGINAL_FILENAME FROM music LEFT OUTER JOIN _rename_log ON music.rowid = _rename_log.rowid_renamed WHERE music.rowid in (SELECT rowid_changed FROM _change_log);") do |row|
+      update_filename = row["ORIGINAL_FILENAME"] || row["FILENAME"]
+      puts "Updating \"#{update_filename}\""
+      Track.update(update_filename, row, config.multivalue_separator, ignore =  ["FILENAME", "ORIGINAL_FILENAME"])
+      if row["ORIGINAL_FILENAME"] # this file should be renamed
+        puts "Renaming \"#{row["ORIGINAL_FILENAME"]}\" to \"#{row["FILENAME"]}\""
+        FileUtils.mkdir_p(File.basename(row["FILENAME"]))
+        FileUtils.mv(row["ORIGINAL_FILENAME"], row["FILENAME"])
+      end
+    end
+  end
+
+end
+
+# all done, remove the temporary database
+File.unlink(config.tmpdb)

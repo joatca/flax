@@ -1,0 +1,21 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    ffi (1.14.2)
+    file-find (0.4.4)
+      sys-admin (>= 1.6.0)
+    sqlite3 (1.4.2)
+    sys-admin (1.7.4)
+      ffi (>= 1.1.0)
+    taglib-ruby (1.0.1)
+
+PLATFORMS
+  x86_64-linux
+
+DEPENDENCIES
+  file-find
+  sqlite3
+  taglib-ruby
+
+BUNDLED WITH
+   2.2.3
