@@ -96,7 +96,7 @@ class Track
   # i: integer
   # n: number
   META_COLUMNS = [
-    # these fields are recommended by https://open.spotify.com/artist/6AVCyrpR4Xa1KGogDooLrU/discography
+    # these fields are recommended by https://xiph.org/vorbis/doc/v-comment.html
     "title_t",
     "version_t",
     "album_t",
