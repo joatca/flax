@@ -17,10 +17,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-require "find"
+# stdlib stuff
 require "set"
 require 'fileutils'
 require "optparse"
+require "io/console"
+# gems
 require "taglib"
 require "file-find"
 require 'sqlite3'
@@ -237,25 +239,48 @@ SQLite3::Database.new(config.tmpdb) do |db|
   end
   db.close
 
-  # run the sqlite command on the resulting database
-  system(config.run, config.tmpdb)
+  catch(:done) do
 
-  # open the database again to check the changes
-  SQLite3::Database.new(config.tmpdb) do |db|
-    db.results_as_hash = true
-    # find all changed records (and original filenames if they were renamed)
-    db.execute("SELECT music.*, _rename_log.original_filename AS ORIGINAL_FILENAME FROM music LEFT OUTER JOIN _rename_log ON music.rowid = _rename_log.rowid_renamed WHERE music.rowid in (SELECT rowid_changed FROM _change_log);") do |row|
-      update_filename = row["ORIGINAL_FILENAME"] || row["FILENAME"]
-      puts "Updating \"#{update_filename}\""
-      Track.update(update_filename, row, config.multivalue_separator, ignore =  ["FILENAME", "ORIGINAL_FILENAME"])
-      if row["ORIGINAL_FILENAME"] # this file should be renamed
-        puts "Renaming \"#{row["ORIGINAL_FILENAME"]}\" to \"#{row["FILENAME"]}\""
-        FileUtils.mkdir_p(File.basename(row["FILENAME"]))
-        FileUtils.mv(row["ORIGINAL_FILENAME"], row["FILENAME"])
+    loop do
+      # run the sqlite command on the resulting database
+      system(config.run, config.tmpdb)
+
+      # open the database again to check the changes
+      cc, rc, dc = 0
+      SQLite3::Database.new(config.tmpdb) do |db|
+        db.results_as_hash = false
+        cc = db.get_first_value("SELECT count(*) FROM _change_log")
+        rc = db.get_first_value("SELECT count(*) FROM _rename_log")
+        dc = db.get_first_value("SELECT count(*) FROM _delete_log")
+      end
+      print "Deletions: #{dc}; renames: #{rc}; changes: #{cc}; (s)save, (e)edit or (a)bandon changes? "
+      case STDIN.getch.downcase
+      when "s"
+        puts "saving"
+        SQLite3::Database.new(config.tmpdb) do |db|
+          db.results_as_hash = true
+          # find all changed records (and original filenames if they were renamed)
+          db.execute("SELECT music.*, _rename_log.original_filename AS ORIGINAL_FILENAME FROM music LEFT OUTER JOIN _rename_log ON music.rowid = _rename_log.rowid_renamed WHERE music.rowid in (SELECT rowid_changed FROM _change_log);") do |row|
+            update_filename = row["ORIGINAL_FILENAME"] || row["FILENAME"]
+            puts "Updating \"#{update_filename}\""
+            Track.update(update_filename, row, config.multivalue_separator, ignore =  ["FILENAME", "ORIGINAL_FILENAME"])
+            if row["ORIGINAL_FILENAME"] # this file should be renamed
+              puts "Renaming \"#{row["ORIGINAL_FILENAME"]}\" to \"#{row["FILENAME"]}\""
+              FileUtils.mkdir_p(File.basename(row["FILENAME"]))
+              FileUtils.mv(row["ORIGINAL_FILENAME"], row["FILENAME"])
+            end
+          end
+        end
+        throw :done
+      when "e"
+        puts "back to SQLite"
+      when "a"
+        puts "Abandoning changes"
+        throw :done
       end
     end
   end
-
+  
 end
 
 # all done, remove the temporary database
