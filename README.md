@@ -40,7 +40,7 @@ Install Ruby, Ruby Bundler and SQLite3 using your distro utilities then, inside 
 
 ## Multi-value Fields ##
 
-All Vorbis comment fields are multi-valued (that is, it is legal and common to have more than one value for each field name, for example, more than one artist). It would be possible to represent this properly in SQL using several tables with one-to-many or many-to-many relationships but the resulting sctructure would be extremely painful to work with. `flax` opts to load fields with multiple values into a single column with a magic separator character (by default `;`) so you must take care to avoid using this character as actual data.
+All Vorbis comment fields are multi-valued (that is, it is legal and common to have more than one value for each field name, for example, more than one artist). It would be possible to represent this properly in SQL using several tables with one-to-many or many-to-many relationships but the resulting structure would be extremely painful to work with. `flax` opts to load fields with multiple values into a single column with a magic separator character (by default `;`) so you must take care to avoid using this character as actual data.
 
 # More Examples #
 
