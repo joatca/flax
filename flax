@@ -270,6 +270,10 @@ SQLite3::Database.new(config.tmpdb) do |db|
               FileUtils.mv(row["ORIGINAL_FILENAME"], row["FILENAME"])
             end
           end
+          db.execute("SELECT * FROM _delete_log;") do |row|
+            puts "Deleting \"#{row["deleted_filename"]}\""
+            FileUtils.rm_f([row["deleted_filename"]])
+          end
         end
         throw :done
       when "e"
